@@ -953,15 +953,6 @@ struct whisper_state {
 
     // [EXPERIMENTAL] speed-up techniques
     int32_t exp_n_audio_ctx = 0; // 0 - use default
-
-    struct vad_segment_info {
-        float orig_start;
-        float orig_end;
-        float vad_start;
-        float vad_end;
-    };
-    std::vector<vad_segment_info> vad_segments;
-    bool has_vad_segments = false;
 };
 
 struct whisper_context {
@@ -4421,6 +4412,17 @@ struct whisper_vad_segments {
     std::vector<whisper_vad_segment> data;
 };
 
+struct whisper_vad_state {
+    struct vad_segment_info {
+        float orig_start;
+        float orig_end;
+        float vad_start;
+        float vad_end;
+    };
+    std::vector<vad_segment_info> vad_segments;
+    bool has_vad_segments = false;
+};
+
 struct whisper_vad_context {
     int64_t t_vad_us = 0;
 
@@ -4439,8 +4441,9 @@ struct whisper_vad_context {
     struct ggml_tensor * h_state;
     struct ggml_tensor * c_state;
     std::vector<float>   probs;
-};
 
+    whisper_vad_state * state = nullptr;
+};
 struct whisper_vad_context_params whisper_vad_default_context_params(void) {
     whisper_vad_context_params result = {
         /*.n_thread                = */ 4,
@@ -4657,6 +4660,11 @@ static struct ggml_cgraph * whisper_vad_build_graph(whisper_vad_context & vctx) 
     return gf;
 }
 
+struct whisper_vad_state * whisper_vad_init_state(whisper_vad_context * vctx) {
+    whisper_vad_state * vstate = new whisper_vad_state;
+    return vstate;
+}
+
 static bool whisper_vad_init_context(whisper_vad_context * vctx) {
 
     auto whisper_context_params = whisper_context_default_params();
@@ -4664,6 +4672,14 @@ static bool whisper_vad_init_context(whisper_vad_context * vctx) {
     //whisper_context_params.use_gpu    = vctx->params.use_gpu;
     whisper_context_params.use_gpu    = false;
     whisper_context_params.gpu_device = vctx->params.gpu_device;
+
+    
+
+    vctx->state = whisper_vad_init_state(vctx);
+    if (!vctx->state) {
+        whisper_vad_free(vctx);
+        return nullptr;
+    }
 
     vctx->backends = whisper_backend_init(whisper_context_params);
     if (vctx->backends.empty()) {
@@ -5438,24 +5454,32 @@ struct whisper_vad_segments * whisper_vad_segments_from_samples(
     return whisper_vad_segments_from_probs(vctx, params);
 }
 
-void whisper_vad_free(whisper_vad_context * ctx) {
-    if (ctx) {
-        for (ggml_context * context : ctx->model.ctxs) {
+void whisper_vad_free(whisper_vad_context * vctx) {
+    if (vctx) {
+        for (ggml_context * context : vctx->model.ctxs) {
             ggml_free(context);
         }
 
-        for (ggml_backend_buffer_t buf : ctx->model.buffers) {
+        for (ggml_backend_buffer_t buf : vctx->model.buffers) {
             ggml_backend_buffer_free(buf);
         }
 
-        ggml_backend_sched_free(ctx->sched.sched);
+        ggml_backend_sched_free(vctx->sched.sched);
 
-        for (auto & backend : ctx->backends) {
+        for (auto & backend : vctx->backends) {
             ggml_backend_free(backend);
         }
 
+            
+        whisper_vad_free_state(vctx->state);
 
-        delete ctx;
+        delete vctx;
+    }
+}
+
+void whisper_vad_free_state(whisper_vad_state * state) {
+    if (state) {
+        delete state;
     }
 }
 
@@ -6603,18 +6627,17 @@ static void whisper_sequence_score(
 }
 
 static bool whisper_vad(
-        struct whisper_context * ctx,
-          struct whisper_state * state,
-    struct whisper_full_params   params,
-                   const float * samples,
-                           int   n_samples,
-            std::vector<float> & filtered_samples,
-                           int & filtered_n_samples) {
+        struct whisper_vad_context * vctx,
+        struct whisper_full_params   params,
+        const float * samples,
+        int   n_samples,
+        std::vector<float> & filtered_samples,
+        int & filtered_n_samples) {
     WHISPER_LOG_INFO("%s: VAD is enabled, processing speach segments only\n", __func__);
     filtered_n_samples = 0;
 
-    struct whisper_vad_context_params vad_ctx_params = whisper_vad_default_context_params();
-    struct whisper_vad_context * vctx = whisper_vad_init_from_file_with_params(params.vad_model_path, vad_ctx_params);
+    /*struct whisper_vad_context_params vad_ctx_params = whisper_vad_default_context_params();
+    struct whisper_vad_context * vctx = whisper_vad_init_from_file_with_params(params.vad_model_path, vad_ctx_params);*/
     if (vctx == nullptr) {
         WHISPER_LOG_ERROR("%s: failed to initialize VAD context\n", __func__);
         return false;
@@ -6625,9 +6648,9 @@ static bool whisper_vad(
     whisper_vad_segments * vad_segments = whisper_vad_segments_from_samples(vctx, vad_params, samples, n_samples);
 
     if (vad_segments->data.size() > 0) {
-        state->has_vad_segments = true;
-        ctx->state->vad_segments.clear();
-        ctx->state->vad_segments.reserve(vad_segments->data.size());
+        vctx->state->has_vad_segments = true;
+        vctx->state->vad_segments.clear();
+        vctx->state->vad_segments.reserve(vad_segments->data.size());
 
         WHISPER_LOG_INFO("%s: detected %d speech segments\n", __func__, (int)vad_segments->data.size());
         float overlap_seconds = vad_params.samples_overlap;
@@ -6680,7 +6703,7 @@ static bool whisper_vad(
             int segment_length = segment_end_samples - segment_start_samples;
 
             if (segment_length > 0) {
-                whisper_state::vad_segment_info segment;
+                whisper_vad_state::vad_segment_info segment;
 
                 segment.orig_start = vad_segments->data[i].start;
                 segment.orig_end   = vad_segments->data[i].end;
@@ -6690,7 +6713,7 @@ static bool whisper_vad(
 
                 WHISPER_LOG_INFO("%s: vad_segment_info: orig_start: %.2f, orig_end: %.2f, vad_start: %.2f, vad_end: %.2f\n",
                     __func__, segment.orig_start, segment.orig_end, segment.vad_start, segment.vad_end);
-                ctx->state->vad_segments.push_back(segment);
+                vctx->state->vad_segments.push_back(segment);
 
                 // Copy this speech segment
                 memcpy(filtered_samples.data() + offset, samples + segment_start_samples, segment_length * sizeof(float));
@@ -6724,7 +6747,7 @@ int whisper_full_with_state(
 
     result_all.clear();
 
-    const float * process_samples = samples;
+    /*const float * process_samples = samples;
     int n_process_samples = n_samples;
     std::vector<float> vad_samples;
 
@@ -6737,11 +6760,11 @@ int whisper_full_with_state(
         }
         process_samples = vad_samples.data();
         n_process_samples = vad_n_samples;
-    }
+    }*/
 
-    if (n_process_samples > 0) {
+    if (n_samples > 0) {
         // compute log mel spectrogram
-        if (whisper_pcm_to_mel_with_state(ctx, state, process_samples, n_process_samples, params.n_threads) != 0) {
+        if (whisper_pcm_to_mel_with_state(ctx, state, samples, n_samples, params.n_threads) != 0) {
             WHISPER_LOG_ERROR("%s: failed to compute log mel spectrogram\n", __func__);
             return -2;
         }
@@ -7785,7 +7808,7 @@ int whisper_full_lang_id(struct whisper_context * ctx) {
     return ctx->state->lang_id;
 }
 
-int64_t whisper_full_get_segment_t0_from_state(struct whisper_state * state, int i_segment) {
+/*int64_t whisper_full_get_segment_t0_from_state(struct whisper_state * state, int i_segment) {
     // If VAD wasn't used, return the original timestamp
     if (!state->has_vad_segments || state->vad_segments.empty()) {
         return state->result_all[i_segment].t0;
@@ -7843,13 +7866,17 @@ int64_t whisper_full_get_segment_t0_from_state(struct whisper_state * state, int
 
     WHISPER_LOG_WARN("%s: Could not map t0 = %f to a VAD segment\n", __func__, t0);
     return t0;
+}*/
+
+int64_t whisper_full_get_segment_t0_from_state(struct whisper_state * state, int i_segment) {
+    return state->result_all[i_segment].t0;
 }
 
 int64_t whisper_full_get_segment_t0(struct whisper_context * ctx, int i_segment) {
     return whisper_full_get_segment_t0_from_state(ctx->state, i_segment);
 }
 
-int64_t whisper_full_get_segment_t1_from_state(struct whisper_state * state, int i_segment) {
+/*int64_t whisper_full_get_segment_t1_from_state(struct whisper_state * state, int i_segment) {
     // If VAD wasn't used, return the original timestamp
     if (!state->has_vad_segments || state->vad_segments.empty()) {
         return state->result_all[i_segment].t1;
@@ -7909,7 +7936,12 @@ int64_t whisper_full_get_segment_t1_from_state(struct whisper_state * state, int
 
     WHISPER_LOG_WARN("%s: Could not map t1 = %f to a VAD segment\n", __func__, t1);
     return t1;
+}*/
+
+int64_t whisper_full_get_segment_t1_from_state(struct whisper_state * state, int i_segment) {
+    return state->result_all[i_segment].t1;
 }
+
 
 int64_t whisper_full_get_segment_t1(struct whisper_context * ctx, int i_segment) {
     return whisper_full_get_segment_t1_from_state(ctx->state, i_segment);
