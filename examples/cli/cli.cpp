@@ -70,6 +70,7 @@ struct whisper_params {
     bool no_prints       = false;
     bool print_special   = false;
     bool print_colors    = false;
+    bool print_confidence= false;
     bool print_progress  = false;
     bool no_timestamps   = false;
     bool log_score       = false;
@@ -179,6 +180,7 @@ static bool whisper_params_parse(int argc, char ** argv, whisper_params & params
         else if (arg == "-np"   || arg == "--no-prints")       { params.no_prints       = true; }
         else if (arg == "-ps"   || arg == "--print-special")   { params.print_special   = true; }
         else if (arg == "-pc"   || arg == "--print-colors")    { params.print_colors    = true; }
+        else if (                  arg == "--print-confidence"){ params.print_confidence= true; }
         else if (arg == "-pp"   || arg == "--print-progress")  { params.print_progress  = true; }
         else if (arg == "-nt"   || arg == "--no-timestamps")   { params.no_timestamps   = true; }
         else if (arg == "-l"    || arg == "--language")        { params.language        = whisper_param_turn_lowercase(ARGV_NEXT); }
@@ -197,7 +199,7 @@ static bool whisper_params_parse(int argc, char ** argv, whisper_params & params
         else if (                  arg == "--grammar-rule")    { params.grammar_rule    = ARGV_NEXT; }
         else if (                  arg == "--grammar-penalty") { params.grammar_penalty = std::stof(ARGV_NEXT); }
         // Voice Activity Detection (VAD)
-        else if (arg == "-v"    || arg == "--vad")                         { params.vad                         = true; }
+        else if (                  arg == "--vad")                         { params.vad                         = true; }
         else if (arg == "-vm"   || arg == "--vad-model")                   { params.vad_model                   = ARGV_NEXT; }
         else if (arg == "-vt"   || arg == "--vad-threshold")               { params.vad_threshold               = std::stof(ARGV_NEXT); }
         else if (arg == "-vsd"  || arg == "--vad-min-speech-duration-ms")  { params.vad_min_speech_duration_ms  = std::stoi(ARGV_NEXT); }
@@ -257,6 +259,7 @@ static void whisper_print_usage(int /*argc*/, char ** argv, const whisper_params
     fprintf(stderr, "  -np,       --no-prints         [%-7s] do not print anything other than the results\n",   params.no_prints ? "true" : "false");
     fprintf(stderr, "  -ps,       --print-special     [%-7s] print special tokens\n",                           params.print_special ? "true" : "false");
     fprintf(stderr, "  -pc,       --print-colors      [%-7s] print colors\n",                                   params.print_colors ? "true" : "false");
+    fprintf(stderr, "             --print-confidence  [%-7s] print confidence\n",                               params.print_confidence ? "true" : "false");
     fprintf(stderr, "  -pp,       --print-progress    [%-7s] print progress\n",                                 params.print_progress ? "true" : "false");
     fprintf(stderr, "  -nt,       --no-timestamps     [%-7s] do not print timestamps\n",                        params.no_timestamps ? "true" : "false");
     fprintf(stderr, "  -l LANG,   --language LANG     [%-7s] spoken language ('auto' for auto-detect)\n",       params.language.c_str());
@@ -276,7 +279,7 @@ static void whisper_print_usage(int /*argc*/, char ** argv, const whisper_params
     fprintf(stderr, "  --grammar-penalty N            [%-7.1f] scales down logits of nongrammar tokens\n",      params.grammar_penalty);
     // Voice Activity Detection (VAD) parameters
     fprintf(stderr, "\nVoice Activity Detection (VAD) options:\n");
-    fprintf(stderr, "  -v,        --vad                           [%-7s] enable Voice Activity Detection (VAD)\n",            params.vad ? "true" : "false");
+    fprintf(stderr, "             --vad                           [%-7s] enable Voice Activity Detection (VAD)\n",            params.vad ? "true" : "false");
     fprintf(stderr, "  -vm FNAME, --vad-model FNAME               [%-7s] VAD model path\n",                                   params.vad_model.c_str());
     fprintf(stderr, "  -vt N,     --vad-threshold N               [%-7.2f] VAD threshold for speech recognition\n",           params.vad_threshold);
     fprintf(stderr, "  -vspd N,   --vad-min-speech-duration-ms  N [%-7d] VAD min speech duration (0.0-1.0)\n",                params.vad_min_speech_duration_ms);
@@ -385,6 +388,26 @@ static void whisper_print_segment_callback(struct whisper_context * ctx, struct 
                 const int col = std::max(0, std::min((int) k_colors.size() - 1, (int) (std::pow(p, 3)*float(k_colors.size()))));
 
                 printf("%s%s%s%s", speaker.c_str(), k_colors[col].c_str(), text, "\033[0m");
+            }
+        } else if (params.print_confidence) {
+            for (int j = 0; j < whisper_full_n_tokens(ctx, i); ++j) {
+                if (params.print_special == false) {
+                    const whisper_token id = whisper_full_get_token_id(ctx, i, j);
+                    if (id >= whisper_token_eot(ctx)) {
+                        continue;
+                    }
+                }
+
+                const char * text = whisper_full_get_token_text(ctx, i, j);
+                const float  p    = whisper_full_get_token_p   (ctx, i, j);
+
+                int style_idx = 2;     // High confidence - dim
+                if (p < 0.33) {
+                    style_idx = 0;     // Low confidence - inverse (highlighted)
+                } else if (p < 0.66) {
+                    style_idx = 1;     // Medium confidence - underlined
+                }
+                printf("%s%s%s%s", speaker.c_str(), k_styles[style_idx].c_str(), text, "\033[0m");
             }
         } else {
             const char * text = whisper_full_get_segment_text(ctx, i);
@@ -1115,6 +1138,8 @@ int main(int argc, char ** argv) {
 
             if (params.print_colors) {
                 fprintf(stderr, "%s: color scheme: red (low confidence), yellow (medium), green (high confidence)\n", __func__);
+            } else if (params.print_confidence) {
+                fprintf(stderr, "%s: confidence: highlighted (low confidence), underlined (medium), dim (high confidence)\n", __func__);
             }
             fprintf(stderr, "\n");
         }
