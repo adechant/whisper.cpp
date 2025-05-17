@@ -4462,6 +4462,11 @@ struct whisper_vad_params whisper_vad_default_params(void) {
     return result;
 }
 
+
+int whisper_vad_window_size(struct whisper_vad_context * vctx){
+    return vctx->n_window;
+}
+
 static bool weight_buft_supported(const whisper_vad_hparams & hparams, ggml_tensor * w, ggml_op op, ggml_backend_buffer_type_t buft, ggml_backend_dev_t dev) {
     bool op_supported = true;
 
@@ -5161,7 +5166,7 @@ bool whisper_vad_detect_speech(
         //WHISPER_LOG_DEBUG("chunk %d: p = %7.3f\n", i, probs[i]);
     }
 
-    vctx->t_vad_us += ggml_time_us() - t_start_vad_us;
+    vctx->t_vad_us = ggml_time_us() - t_start_vad_us;
     WHISPER_LOG_INFO("%s: vad time = %.2f ms processing %d samples\n", __func__, 1e-3f * vctx->t_vad_us, n_samples);
 
     ggml_backend_sched_reset(sched);
@@ -5187,6 +5192,10 @@ int whisper_vad_n_probs(struct whisper_vad_context * vctx) {
 
 float * whisper_vad_probs(struct whisper_vad_context * vctx) {
     return vctx->probs.data();
+}
+
+float   whisper_vad_prob   (struct whisper_vad_context * vctx, int i_prob){
+    return vctx->probs[i_prob];
 }
 
 struct whisper_vad_segments * whisper_vad_segments_from_probs(

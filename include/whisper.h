@@ -687,6 +687,8 @@ extern "C" {
     WHISPER_API struct whisper_vad_context * whisper_vad_init_from_file_with_params(const char * path_model,              struct whisper_vad_context_params params);
     WHISPER_API struct whisper_vad_context * whisper_vad_init_with_params          (struct whisper_model_loader * loader, struct whisper_vad_context_params params);
 
+    WHISPER_API int whisper_vad_window_size(struct whisper_vad_context * vctx);
+
     WHISPER_API bool whisper_vad_detect_speech(
             struct whisper_vad_context * vctx,
                            const float * samples,
@@ -694,6 +696,7 @@ extern "C" {
 
     WHISPER_API int     whisper_vad_n_probs(struct whisper_vad_context * vctx);
     WHISPER_API float * whisper_vad_probs  (struct whisper_vad_context * vctx);
+    WHISPER_API float   whisper_vad_prob   (struct whisper_vad_context * vctx, int i_prob);
 
     struct whisper_vad_segments;
 
